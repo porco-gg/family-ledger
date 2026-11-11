@@ -301,6 +301,7 @@ input{font:inherit;color:inherit}
   padding:18px 16px calc(18px + env(safe-area-inset-bottom));
   animation:up .22s cubic-bezier(.2,.8,.2,1);
   max-height:80vh;overflow-y:auto;
+  max-height:80dvh;
 }
 .sheet h3{margin:0 0 14px;font-size:16px;font-weight:600}
 .sheet .btn{margin-top:10px}
@@ -353,7 +354,7 @@ input{font:inherit;color:inherit}
 
 /* ---------- 登录 ---------- */
 .login-wrap{
-  min-height:100vh;display:flex;flex-direction:column;align-items:center;
+  min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;align-items:center;
   justify-content:center;padding:0 28px calc(40px + env(safe-area-inset-bottom));
 }
 .login-logo{
