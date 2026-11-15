@@ -11,8 +11,10 @@ let month = M.todayMonth();
 let add = null;
 let filterAcc = 'all';   // 明细筛选：全部 / 某个账户
 let filterCat = '';      // 明细筛选：空 = 全部分类
+let onlyPending = false; // 明细筛选：只看"我垫的、还没结算"的
 let sortKey = 'time';    // 明细排序：time | amount
 let sortDir = 'desc';    // desc 新→旧 / 大→小；asc 旧→新 / 小→大
+let syncing = false;     // 正在手动同步，防止连点
 let session = api.getSession();
 let syncMsg = '';
 let connectErr = '';     // 连接页的错误提示
@@ -75,6 +77,63 @@ function newAdd() {
     advance: role === 'm1',
     paidBy: role || 'm1',
   };
+}
+
+/* ================= 记一笔：落账 + 重复拦截 ================= */
+
+/** 真的写进账本（add 里已经是当前草稿） */
+function commitAdd(amount) {
+  const tx = M.addTx(state, {
+    type: add.mode,
+    accountId: add.accountId,
+    amount,
+    category: add.catId,
+    date: add.date,
+    note: add.note.trim(),
+    ...(add.mode === 'expense' && add.accountId === M.joint(state).id && add.advance
+      ? { advance: true, paidBy: add.paidBy || 'm1' }
+      : {}),
+  });
+  month = M.monthOf(add.date);
+  add = null;
+  view = 'home';
+  save(state);
+  render();
+  sync.pushTx(state, tx).then((uploaded) => {
+    if (!uploaded) {
+      syncMsg = '这笔先存在手机上，联网后自动补传';
+      render();
+    } else if (syncMsg) {
+      syncMsg = '';
+      render();
+    }
+  });
+}
+
+/** 同一天同金额同分类已经有一笔：问一句是不是重复了 */
+function askDuplicate(same, amount) {
+  const catName = (M.cat(same.category) || {}).name || '';
+  const when = `${M.dayLabel(same.date)}${same.note ? '，备注「' + esc(same.note) + '」' : ''}`;
+  sheet(`
+    <h3>好像已经记过一笔</h3>
+    <div class="small muted" style="margin-bottom:16px">
+      ${when} 已经有一笔 <b>${M.fmt(same.amount)} 元</b>${catName ? '（' + esc(catName) + '）' : ''}。
+      如果是同一笔，就别再记了。
+    </div>
+    <button class="btn" id="dup-yes">还是再记一笔</button>
+    <button class="btn ghost" id="dup-no">不记了</button>
+  `, (root) => {
+    root.querySelector('#dup-yes').addEventListener('click', () => {
+      root.remove();
+      commitAdd(amount);
+    });
+    root.querySelector('#dup-no').addEventListener('click', () => {
+      root.remove();
+      add = null;
+      view = 'home';
+      render();
+    });
+  });
 }
 
 /* ================= 渲染入口 ================= */
@@ -280,6 +339,7 @@ function renderList() {
   const filtered = all.filter((t) => {
     if (filterAcc !== 'all' && t.accountId !== filterAcc && t.toAccountId !== filterAcc) return false;
     if (filterCat && t.category !== filterCat) return false;
+    if (onlyPending && !(t.advance && !t.settledAt)) return false;
     return true;
   });
   const list = M.sortTx(filtered, sortKey, sortDir);
@@ -333,8 +393,11 @@ function renderList() {
       ${M.CATS.map((c) => catChip(c.id, c.name)).join('')}
     </div>
     <div class="filter-sum">
-      <span>共 ${list.length} 笔${filterAcc !== 'all' || filterCat ? '（筛选后）' : ''} · 支出合计 <b>${M.fmtInt(spent)}</b> 元</span>
-      <button class="fchip sort" data-act="sort">${sortLabel}</button>
+      <span>共 ${list.length} 笔${filterAcc !== 'all' || filterCat || onlyPending ? '（筛选后）' : ''}${onlyPending ? ' · 待结算合计 <b>' + M.fmtInt(spent) + '</b> 元' : ' · 支出合计 <b>' + M.fmtInt(spent) + '</b> 元'}</span>
+      <span class="filter-actions">
+        <button class="fchip ${onlyPending ? 'on' : ''}" data-act="filter-pending">待结算</button>
+        <button class="fchip sort" data-act="sort">${sortLabel}</button>
+      </span>
     </div>
     ${html}
   </div>`;
@@ -414,7 +477,7 @@ function renderMore() {
       <div class="list-card">
         ${row('导出备份', '生成 JSON 文件', 'export')}
         ${row('导入备份', '从文件恢复', 'import')}
-        ${row('立刻同步', sync.pendingCount() ? `还有 ${sync.pendingCount()} 笔没传` : '重拉一次云端', 'sync-now')}
+        ${row('立刻同步', syncing ? '正在同步…' : sync.pendingCount() ? `还有 ${sync.pendingCount()} 笔没传` : '重拉一次云端', 'sync-now')}
       </div>
     </div>
 
@@ -597,31 +660,22 @@ app.addEventListener('click', (e) => {
     case 'add-save': {
       const amount = M.parseAmount(add.amountStr);
       if (!amount) return;
-      const tx = M.addTx(state, {
-        type: add.mode,
-        accountId: add.accountId,
-        amount,
-        category: add.catId,
-        date: add.date,
-        note: add.note.trim(),
-        ...(add.mode === 'expense' && add.accountId === M.joint(state).id && add.advance
-          ? { advance: true, paidBy: add.paidBy || 'm1' }
-          : {}),
-      });
-      month = M.monthOf(add.date);
-      add = null;
-      view = 'home';
-      save(state);
-      render();
-      sync.pushTx(state, tx).then((uploaded) => {
-        if (!uploaded) {
-          syncMsg = '这笔先存在手机上，联网后自动补传';
-          render();
-        } else if (syncMsg) {
-          syncMsg = '';
-          render();
-        }
-      });
+      // 同一天、同金额、同分类、同一个账户已经有一笔了 —— 很可能是重复记
+      // （点快了、或者以为没存上又记了一次）。先问一句，别直接落两笔。
+      const same = state.transactions.find(
+        (t) =>
+          !t.deletedAt &&
+          t.type === add.mode &&
+          t.date === add.date &&
+          t.amount === amount &&
+          t.accountId === add.accountId &&
+          (t.category || '') === (add.catId || ''),
+      );
+      if (same) {
+        askDuplicate(same, amount);
+        break;
+      }
+      commitAdd(amount);
       break;
     }
 
@@ -633,6 +687,11 @@ app.addEventListener('click', (e) => {
 
     case 'filter-cat':
       filterCat = v;
+      render();
+      break;
+
+    case 'filter-pending':
+      onlyPending = !onlyPending;
       render();
       break;
 
@@ -873,15 +932,22 @@ app.addEventListener('click', (e) => {
       break;
 
     case 'sync-now': {
-      const before = sync.pendingCount();
-      sync.flush().then((n) => {
-        return sync.pull(state).then(() => {
-          save(state);
-          syncMsg = before ? `补传了 ${Math.min(n, before)} 笔` : '已经是最新的';
-          render();
-        });
+      if (syncing) break;
+      syncing = true;
+      syncMsg = '正在同步…';
+      render();
+      sync.flush().then(async (n) => {
+        await sync.pull(state);
+        save(state);
+        const left = sync.pendingCount();
+        syncMsg = left === 0
+          ? (n ? `补传了 ${n} 笔，已经是最新的` : '已经是最新的')
+          : `还有 ${left} 笔没传上去，等会儿会自动重试`;
+        syncing = false;
+        render();
       }).catch(() => {
         syncMsg = '连不上，稍后再试';
+        syncing = false;
         render();
       });
       break;
