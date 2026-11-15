@@ -192,7 +192,9 @@ async function mutateYear(year, mutate, message) {
       await new Promise((r) => setTimeout(r, 400 + Math.random() * 400));
     }
   }
-  throw new Error('写入冲突，稍后再点一次');
+  const conflict = new Error('写入冲突，稍后再点一次');
+  conflict.code = 409;
+  throw conflict;
 }
 
 function upsertInto(doc, tx) {
@@ -276,7 +278,9 @@ async function applySettingsPatch(patch) {
       await new Promise((r) => setTimeout(r, 400 + Math.random() * 400));
     }
   }
-  throw new Error('写入冲突，稍后再点一次');
+  const conflict = new Error('写入冲突，稍后再点一次');
+  conflict.code = 409;
+  throw conflict;
 }
 
 export async function pushSettings(state, patch) {
@@ -305,8 +309,11 @@ async function flushSettings() {
 
 /* ================= 补传 ================= */
 
-/** 把积压的记录补上去，返回成功条数 */
-export async function flush() {
+// 同一时刻只允许一次补传。连点「立刻同步」、或者回到前台和手动同步撞在一起时，
+// 两次 flush 会并发读同一份队列、各自改写同一个文件，白跑几趟还容易互相覆盖。
+let flushing = null;
+
+async function doFlush() {
   const arr = getPending();
   let done = 0;
   for (const item of arr) {
@@ -316,9 +323,12 @@ export async function flush() {
       dropPending(item.id);
       done++;
     } catch (e) {
-      // 队列本身不合法（比如 400/404）就丢掉，免得永远卡住；
-      // 409 是冲突，网络错误是 0，都留到下次
-      if (e.code >= 400 && e.code < 500 && e.code !== 409) {
+      // 只有「网络断了」和「别人刚写过」值得重试；其它（队列本身坏了、400/404/422，
+      // 或者代码抛的非 HTTP 错误）一律丢掉，否则这一条会永远卡在队列里，
+      // 手机上就永远显示"还有 1 笔没传"。
+      const retry = e.code === 0 || e.code === 409 || e.code >= 500;
+      if (!retry) {
+        console.warn('[sync] 丢弃一条传不上去的记录', item.id, e && e.message);
         dropPending(item.id);
         continue;
       }
@@ -327,6 +337,15 @@ export async function flush() {
   }
   await flushSettings();
   return done;
+}
+
+/** 把积压的记录补上去，返回成功条数。并发调用会共用同一次补传 */
+export function flush() {
+  if (flushing) return flushing;
+  flushing = doFlush().finally(() => {
+    flushing = null;
+  });
+  return flushing;
 }
 
 /* ================= 首次初始化 ================= */
