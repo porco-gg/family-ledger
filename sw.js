@@ -1,4 +1,4 @@
-const CACHE = 'family-ledger-v2';
+const CACHE = 'family-ledger-v3';
 const SHELL = [
   './',
   './index.html',
